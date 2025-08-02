@@ -127,23 +127,31 @@ def execute_task():
         if not st.session_state.task_running:
             return "Task Not Started"
         
+        # Initialize first phase
         if st.session_state.phase_start_time is None:
             st.session_state.phase_start_time = current_time
             st.session_state.current_phase = "Charging"
+            st.info(f"🔋 Starting Charging Phase for {config.get('charge_time', 10)} seconds")
             return "Charging"
         
         elapsed = current_time - st.session_state.phase_start_time
         
+        # Phase transitions with notifications
         if st.session_state.current_phase == "Charging" and elapsed >= config.get('charge_time', 10):
             st.session_state.current_phase = "Idle"
             st.session_state.phase_start_time = current_time
+            st.info(f"⏸️ Switching to Idle Phase for {config.get('idle_time', 5)} seconds")
+            
         elif st.session_state.current_phase == "Idle" and elapsed >= config.get('idle_time', 5):
             st.session_state.current_phase = "Discharging"
             st.session_state.phase_start_time = current_time
+            st.info(f"⚡ Switching to Discharging Phase for {config.get('discharge_time', 10)} seconds")
+            
         elif st.session_state.current_phase == "Discharging" and elapsed >= config.get('discharge_time', 10):
             st.session_state.task_running = False
             st.session_state.current_phase = "Task Complete"
             st.session_state.phase_start_time = None
+            st.success("✅ Task Completed Successfully!")
             return "Task Complete"
         
         return st.session_state.current_phase
@@ -178,17 +186,84 @@ if page == "📊 Real-Time Monitoring":
     # Task status display
     current_phase = execute_task()
     
-    col1, col2, col3 = st.columns(3)
+    # Enhanced status display with progress
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Phase", current_phase)
+        if current_phase == "Charging":
+            st.metric("Current Phase", "🔋 " + current_phase, delta="Active")
+        elif current_phase == "Discharging":
+            st.metric("Current Phase", "⚡ " + current_phase, delta="Active")
+        elif current_phase == "Idle":
+            st.metric("Current Phase", "⏸️ " + current_phase, delta="Active")
+        else:
+            st.metric("Current Phase", current_phase)
+    
     with col2:
         if st.session_state.task_running and st.session_state.phase_start_time:
             elapsed = time.time() - st.session_state.phase_start_time
             st.metric("Phase Duration (s)", f"{elapsed:.1f}")
+            
+            # Show phase progress
+            config = st.session_state.task_config
+            if current_phase == "Charging":
+                max_time = config.get('charge_time', 10)
+            elif current_phase == "Idle":
+                max_time = config.get('idle_time', 5)
+            elif current_phase == "Discharging":
+                max_time = config.get('discharge_time', 10)
+            else:
+                max_time = 1
+            
+            progress = min(elapsed / max_time, 1.0)
+            st.progress(progress)
         else:
             st.metric("Phase Duration (s)", "0.0")
+    
     with col3:
-        st.metric("Task Status", "Running" if st.session_state.task_running else "Stopped")
+        st.metric("Task Status", "🟢 Running" if st.session_state.task_running else "🔴 Stopped")
+    
+    with col4:
+        if st.session_state.task_running and st.session_state.phase_start_time:
+            config = st.session_state.task_config
+            if current_phase == "Charging":
+                remaining = config.get('charge_time', 10) - (time.time() - st.session_state.phase_start_time)
+            elif current_phase == "Idle":
+                remaining = config.get('idle_time', 5) - (time.time() - st.session_state.phase_start_time)
+            elif current_phase == "Discharging":
+                remaining = config.get('discharge_time', 10) - (time.time() - st.session_state.phase_start_time)
+            else:
+                remaining = 0
+            
+            remaining = max(remaining, 0)
+            st.metric("Time Remaining (s)", f"{remaining:.1f}")
+        else:
+            st.metric("Time Remaining (s)", "0.0")
+    
+    # Task sequence visualization
+    if st.session_state.task_running:
+        st.subheader("Task Sequence Progress")
+        config = st.session_state.task_config
+        
+        # Create visual timeline
+        phases = ["Charging", "Idle", "Discharging"]
+        durations = [config.get('charge_time', 10), config.get('idle_time', 5), config.get('discharge_time', 10)]
+        
+        cols = st.columns(3)
+        for i, (phase, duration) in enumerate(zip(phases, durations)):
+            with cols[i]:
+                if phase == current_phase:
+                    st.success(f"🔥 {phase} (Active)")
+                    if st.session_state.phase_start_time:
+                        elapsed = time.time() - st.session_state.phase_start_time
+                        progress = min(elapsed / duration, 1.0)
+                        st.progress(progress)
+                        st.write(f"Progress: {progress*100:.1f}%")
+                elif phases.index(phase) < phases.index(current_phase) if current_phase in phases else False:
+                    st.info(f"✅ {phase} (Completed)")
+                else:
+                    st.warning(f"⏳ {phase} (Pending)")
+                
+                st.write(f"Duration: {duration}s")
     
     # Generate current cell data
     current_data = []
@@ -198,12 +273,13 @@ if page == "📊 Real-Time Monitoring":
             current_data.append(cell_data)
     
     if current_data:
-        # Add to historical data
-        st.session_state.historical_data.extend(current_data)
-        
-        # Keep only last 1000 records to prevent memory issues
-        if len(st.session_state.historical_data) > 1000:
-            st.session_state.historical_data = st.session_state.historical_data[-1000:]
+        # Add to historical data only if task is running or just completed
+        if st.session_state.task_running or current_phase == "Task Complete":
+            st.session_state.historical_data.extend(current_data)
+            
+            # Keep only last 1000 records to prevent memory issues
+            if len(st.session_state.historical_data) > 1000:
+                st.session_state.historical_data = st.session_state.historical_data[-1000:]
         
         # Display current data
         df_current = pd.DataFrame(current_data)
@@ -244,12 +320,11 @@ if page == "📊 Real-Time Monitoring":
             avg_temp = df_current["Temperature"].mean()
             st.metric("Avg Temperature (°C)", f"{avg_temp:.1f}")
     
-    # Auto-refresh control
+    # Auto-refresh control - only refresh when task is running
     if st.session_state.task_running:
-        # Update every 2 seconds to prevent too frequent refreshes
-        if time.time() - st.session_state.last_update > 2:
-            st.session_state.last_update = time.time()
-            st.rerun()
+        # Update every 1 second for better real-time experience
+        time.sleep(1)
+        st.rerun()
 
 # ================================ CELL CONFIGURATION PAGE ================================
 elif page == "🔧 Cell Configuration":
@@ -393,27 +468,96 @@ elif page == "⚡ Task Controller":
     # Task status
     st.subheader("Current Task Status")
     if st.session_state.task_running:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # Real-time task monitoring
+        current_phase_status = execute_task()
+        config = st.session_state.task_config
         
-        current_phase = execute_task()
-        if st.session_state.phase_start_time:
-            elapsed = time.time() - st.session_state.phase_start_time
+        # Create progress visualization
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.write("**Phase Progress:**")
+            if st.session_state.phase_start_time:
+                elapsed = time.time() - st.session_state.phase_start_time
+                
+                if current_phase_status == "Charging":
+                    max_time = config.get('charge_time', 10)
+                    st.write(f"⚡ Charging: {elapsed:.1f}s / {max_time}s")
+                elif current_phase_status == "Idle":
+                    max_time = config.get('idle_time', 5)
+                    st.write(f"⏸️ Idle: {elapsed:.1f}s / {max_time}s")
+                elif current_phase_status == "Discharging":
+                    max_time = config.get('discharge_time', 10)
+                    st.write(f"🔋 Discharging: {elapsed:.1f}s / {max_time}s")
+                else:
+                    max_time = 1
+                    st.write(f"Status: {current_phase_status}")
+                
+                progress = min(elapsed / max_time, 1.0)
+                progress_bar = st.progress(progress)
+                
+                remaining = max(max_time - elapsed, 0)
+                st.write(f"⏰ Time Remaining: {remaining:.1f}s")
+        
+        with col2:
+            st.write("**Task Sequence:**")
+            total_time = config.get('charge_time', 10) + config.get('idle_time', 5) + config.get('discharge_time', 10)
             
-            if current_phase == "Charging":
-                progress = elapsed / charge_time
-            elif current_phase == "Idle":
-                progress = elapsed / idle_time
-            elif current_phase == "Discharging":
-                progress = elapsed / discharge_time
+            if current_phase_status == "Charging":
+                overall_progress = 0
+                if st.session_state.phase_start_time:
+                    phase_progress = min((time.time() - st.session_state.phase_start_time) / config.get('charge_time', 10), 1.0)
+                    overall_progress = phase_progress * (config.get('charge_time', 10) / total_time)
+            elif current_phase_status == "Idle":
+                base_progress = config.get('charge_time', 10) / total_time
+                if st.session_state.phase_start_time:
+                    phase_progress = min((time.time() - st.session_state.phase_start_time) / config.get('idle_time', 5), 1.0)
+                    overall_progress = base_progress + (phase_progress * (config.get('idle_time', 5) / total_time))
+                else:
+                    overall_progress = base_progress
+            elif current_phase_status == "Discharging":
+                base_progress = (config.get('charge_time', 10) + config.get('idle_time', 5)) / total_time
+                if st.session_state.phase_start_time:
+                    phase_progress = min((time.time() - st.session_state.phase_start_time) / config.get('discharge_time', 10), 1.0)
+                    overall_progress = base_progress + (phase_progress * (config.get('discharge_time', 10) / total_time))
+                else:
+                    overall_progress = base_progress
             else:
-                progress = 1.0
+                overall_progress = 1.0
             
-            progress = min(progress, 1.0)
-            progress_bar.progress(progress)
-            status_text.text(f"Phase: {current_phase} | Elapsed: {elapsed:.1f}s")
+            st.write(f"Overall Progress: {overall_progress*100:.1f}%")
+            st.progress(overall_progress)
+            
+            # Show next phase
+            if current_phase_status == "Charging":
+                st.write(f"⏭️ Next: Idle ({config.get('idle_time', 5)}s)")
+            elif current_phase_status == "Idle":
+                st.write(f"⏭️ Next: Discharging ({config.get('discharge_time', 10)}s)")
+            elif current_phase_status == "Discharging":
+                st.write("⏭️ Next: Task Complete")
+            else:
+                st.write("🏁 Task Finished")
+        
+        # Auto-refresh for task controller page
+        time.sleep(1)
+        st.rerun()
+        
+    elif st.session_state.current_phase == "Task Complete":
+        st.success("✅ Task completed successfully!")
+        st.info("Go to 'Real-Time Monitoring' or 'Data Analysis' to view the collected data.")
+        
+        if st.button("Start New Task"):
+            st.session_state.current_phase = "Idle"
+            st.rerun()
     else:
-        st.info("Task not running")
+        st.info("📋 Task not running. Configure parameters above and click 'Start Task'.")
+        
+        # Show what will happen when task starts
+        st.write("**Task Sequence Preview:**")
+        st.write(f"1. 🔋 Charging: {charge_time} seconds")
+        st.write(f"2. ⏸️ Idle: {idle_time} seconds") 
+        st.write(f"3. ⚡ Discharging: {discharge_time} seconds")
+        st.write(f"**Total Duration: {charge_time + idle_time + discharge_time} seconds**")
 
 # ================================ DATA ANALYSIS PAGE ================================
 elif page == "📈 Data Analysis":
